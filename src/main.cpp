@@ -17,6 +17,7 @@ int test()
 {
     return 0;
 }
+
 void locked(){
   pwm.setPWM(PCA_SERVO_CH1, 0, SERVO_MIN_TICK);
   pwm.setPWM(PCA_SERVO_CH2, 0, SERVO_MIN_TICK);
