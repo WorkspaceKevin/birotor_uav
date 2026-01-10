@@ -17,8 +17,8 @@
 #define PCA_SERVO_CH2  3        // Servo 2（右伺服）
 
 // PCA tick 範圍（你目前用來 map 的參數）
-#define SERVO_MIN_TICK 250     // 伺服輸出最小 tick（對應最小角）
-#define SERVO_MAX_TICK 370     // 伺服輸出最大 tick（對應最大角）
+#define SERVO_MIN_TICK 239     // 伺服輸出最小 tick（對應最小角60度）
+#define SERVO_MAX_TICK 375     // 伺服輸出最大 tick（對應最大角120度）
 #define STICK_MIN_50HZ 102      // 你定義的 50Hz 下搖桿最小 tick
 #define STICK_MAX_50HZ 512      // 你定義的 50Hz 下搖桿最大 tick
 
@@ -39,7 +39,7 @@ static const float COMPLEMENTARY_ALPHA = 0.98f;   // 互補濾波：陀螺權重
 // =======================================================
 // 5) 控制迴圈頻率
 // =======================================================
-static const float LOOP_HZ = 3000.0f;              // 控制迴圈頻率（Hz）
+static const float LOOP_HZ = 400.0f;              // 控制迴圈頻率（Hz）
 static const int   LOOP_DT_US = (int)(1000000.0f / LOOP_HZ);  // 每次 loop 的週期（微秒）
 
 // =======================================================
@@ -154,10 +154,13 @@ extern float Pitch_angInt;   // [ADD]
 extern float Roll_angInt;    // [ADD]
 
 // [ADD] 內迴路（rate loop）D 狀態（Kd=0 時不影響）
-extern float Pitch_rateErrPrev; // [ADD]
-extern float Roll_rateErrPrev;  // [ADD]
-extern float Pitch_dterm_filt;  // [ADD]
-extern float Roll_dterm_filt;   // [ADD]
+extern float Pitch_rateErrPrev; 
+extern float Roll_rateErrPrev;  
+extern float Pitch_rate_dterm_filt; 
+extern float Roll_rate_dterm_filt;
+extern float Pitch_attitude_dterm_filt; 
+extern float Roll_attitude_dterm_filt;
+
 
 // loop timing
 extern int lastLoopUs;

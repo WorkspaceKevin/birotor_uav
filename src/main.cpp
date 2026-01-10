@@ -26,7 +26,9 @@ float Pitch_rateInt = 0.0f, Roll_rateInt  = 0.0f;
 float Pitch_angInt = 0.0f, Roll_angInt = 0.0f;   // [ADD]
 //內迴路（rate loop）D 狀態（Kd=0 時不影響）
 float Pitch_rateErrPrev = 0.0f, Roll_rateErrPrev = 0.0f; // [ADD]
-float Pitch_dterm_filt  = 0.0f, Roll_dterm_filt  = 0.0f; // [ADD]
+float Pitch_attitude_dterm_filt  = 0.0f, Roll_attitude_dterm_filt  = 0.0f; // [ADD]
+float pitch_rate_dterm = 0.0f, roll_rate_dterm = 0.0f; // [ADD]
+float Pitch_rate_dterm_filt = 0.0f, Roll_rate_dterm_filt = 0.0f;
 // 用於紀錄上一次迴圈之誤差值
 float pitch_angle_error_previous = 0.0f, roll_angle_error_previous = 0.0f;
 // loop timing
@@ -69,12 +71,22 @@ float usToTicks(float us) {  //秒數轉ticks(1 tick = 1/4096 of frame)
   return ticks;
 }
 
-float toticks_servo(float servo) {  // Servo設定: 500~2500us(跟油門us範圍不同所以額外寫一個function)
-  servo = constrain(servo, 0.0f, 1.0f);
-  float servo_us = 500.0f + servo * 2000.0f; 
-  float tick = usToTicks(servo_us);
-  return tick;
+int angleToTick(float ang){
+  ang = clampf(ang, SERVO_MIN_ANG, SERVO_MAX_ANG);
+  float t = (ang - SERVO_MIN_ANG) / (SERVO_MAX_ANG - SERVO_MIN_ANG); //0..1
+  return (int)(SERVO_MIN_TICK + t * (SERVO_MAX_TICK - SERVO_MIN_TICK));  //ticks數值
 }
+
+void setServoAngle(uint8_t ch, float ang){
+  pwm.setPWM(ch, 0, angleToTick(ang));
+}
+
+// float toticks_servo(float servo) {  // Servo設定: 500~2500us(跟油門us範圍不同所以額外寫一個function)
+//   servo = constrain(servo, 0.0f, 1.0f);
+//   float servo_us = 500.0f + servo * 2000.0f; 
+//   float tick = usToTicks(servo_us);
+//   return tick;
+// }
 void setESC01(uint8_t ch, float x01) {  //油門0.3-1.0(1000~2000us)
   x01 = clampf(x01, 0.0f, 1.0f);
   float us = 1000.0f + 1000.0f * x01;
@@ -83,13 +95,13 @@ void setESC01(uint8_t ch, float x01) {  //油門0.3-1.0(1000~2000us)
 }
 
 
-void setServoAngle(uint8_t ch, float servo_angle) {  //servo角度set(70~110度)
-  servo_angle = clampf(servo_angle, (float)SERVO_MIN_ANG, (float)SERVO_MAX_ANG);
-  float servo_norm = (servo_angle - SERVO_MIN_ANG) / float(SERVO_MAX_ANG - SERVO_MIN_ANG); // 0到1
-  int servo_tick = (int)(toticks_servo(servo_norm));
-  servo_tick = map(servo_tick, STICK_MIN_50HZ, STICK_MAX_50HZ, SERVO_MIN_TICK, SERVO_MAX_TICK); //將搖桿最大範圍映射到servo的最大範圍
-  pwm.setPWM(ch, 0, servo_tick);
-}
+// void setServoAngle(uint8_t ch, float servo_angle) {  //servo角度set(70~110度)
+//   servo_angle = clampf(servo_angle, (float)SERVO_MIN_ANG, (float)SERVO_MAX_ANG);
+//   float servo_norm = (servo_angle - SERVO_MIN_ANG) / float(SERVO_MAX_ANG - SERVO_MIN_ANG); // 0到1
+//   int servo_tick = (int)(toticks_servo(servo_norm));
+//   servo_tick = map(servo_tick, STICK_MIN_50HZ, STICK_MAX_50HZ, SERVO_MIN_TICK, SERVO_MAX_TICK); //將搖桿最大範圍映射到servo的最大範圍
+//   pwm.setPWM(ch, 0, servo_tick);
+// }
 
 void decodeSbusFrame(const uint8_t *buf, uint16_t *ch) { //SBUS解碼
   ch[0]  = ((uint16_t)buf[1]  | ((uint16_t)buf[2]  << 8)) & 0x07FF;
@@ -179,17 +191,49 @@ void calibrateGyroBias() { //校正一開始的偏移
   Serial.println("IMU校正成功。");
 }
 
-float Pitch_ratePI(float pitch_rateErr, float dt) {  //PI控制器(內迴路)
+float Pitch_ratePID(float pitch_rateErr, float dt) {  //PI控制器(內迴路)
+  // I
   Pitch_rateInt += pitch_rateErr * dt; //積分
   Pitch_rateInt = clampf(Pitch_rateInt, -300.0f, 300.0f);  //積分限幅防止wind-up
-  return Kp_pitch_rate * pitch_rateErr + Ki_pitch_rate * Pitch_rateInt;
+
+  // D = d(error)/dt  (加 dt 保護 + 濾波)
+  pitch_rate_dterm = 0.0f; //微分
+  if (dt > 1e-6f) { // 防止除以零
+    float d_raw = (pitch_rateErr - Pitch_rateErrPrev) / dt;
+
+    float tau = 1.0f / (2.0f * PI * DTERM_CUTOFF_HZ);
+    float alpha = dt / (dt + tau);
+    Pitch_rate_dterm_filt += alpha * (d_raw - Pitch_rate_dterm_filt);
+
+    pitch_rate_dterm = Pitch_rate_dterm_filt;
+  }
+
+  Pitch_rateErrPrev = pitch_rateErr; //更新前次誤差
+
+  return Kp_pitch_rate * pitch_rateErr + Ki_pitch_rate * Pitch_rateInt + Kd_pitch_rate * pitch_rate_dterm;  //回傳控制量
 }
 
-float Roll_ratePI(float rateErr, float dt) {
+
+float Roll_ratePID(float rateErr, float dt) {
   Roll_rateInt += rateErr * dt;
   Roll_rateInt = clampf(Roll_rateInt, -300.0f, 300.0f);
-  float u = Kp_roll_rate * rateErr + Ki_roll_rate * Roll_rateInt;
-  
+
+  // D = d(error)/dt（加 dt 保護 + 濾波）
+  roll_rate_dterm = 0.0f;
+  if (dt > 1e-6f) { // 防止除以零
+    float d_raw = (rateErr - Roll_rateErrPrev) / dt;
+
+
+    float tau = 1.0f / (2.0f * PI * DTERM_CUTOFF_HZ);
+    float alpha = dt / (dt + tau);
+    Roll_rate_dterm_filt += alpha * (d_raw - Roll_rate_dterm_filt);
+
+    roll_rate_dterm = Roll_rate_dterm_filt;
+
+  }
+  Roll_rateErrPrev = rateErr;
+
+  float u = Kp_roll_rate * rateErr + Ki_roll_rate * Roll_rateInt + Kd_roll_rate * roll_rate_dterm;  //回傳控制量;
   u = clampf(u, -ROLL_DIFF_MAX, +ROLL_DIFF_MAX); // 限制差動推力幅度
   return u;   // 回傳「左右油門差動量」
 }
@@ -206,8 +250,12 @@ void resetPI() {
   // inner-loop D states (if you already added D in rate loop)
   Pitch_rateErrPrev = 0.0f;
   Roll_rateErrPrev  = 0.0f;
-  Pitch_dterm_filt  = 0.0f;
-  Roll_dterm_filt   = 0.0f;
+  Pitch_attitude_dterm_filt  = 0.0f;
+  Roll_attitude_dterm_filt   = 0.0f;
+  Pitch_rate_dterm_filt = 0.0f;
+  Roll_rate_dterm_filt  = 0.0f;
+  pitch_rate_dterm = 0.0f;
+  roll_rate_dterm  = 0.0f;
 }
 
 
@@ -226,50 +274,64 @@ void ZeroCalibration(bool valid, int calib_raw, float pitch_deg, float roll_deg)
   }
 }
 
-//----------------------------------姿態控制器------------------------------------------- 
+//----------------------------------姿態(角度)控制器-------------------------------------- 
 float attitude_Pitch_PID(float angle_cmd_deg, float angle_meas_deg,
-                         float gx_dps, float dt,
-                         float Kp, float Ki, float Kd,
+                         float dt, float Kp, float Ki, float Kd,
                          float rate_limit_dps) {
-  float angle_error = (angle_cmd_deg - angle_meas_deg) * SIGN_PITCH;
+  float pitch_angle_error = (angle_cmd_deg - angle_meas_deg) * SIGN_PITCH;
 
   // I (angle error integral)
-  Pitch_angInt += angle_error * dt;
+  Pitch_angInt += pitch_angle_error * dt;
   Pitch_angInt = clampf(Pitch_angInt, -ANG_INT_LIM_PITCH, +ANG_INT_LIM_PITCH);
 
-  // D (use measured angular rate; avoids derivative kick)
-  float d_term = 0.0f;
+  float pitch_attitude_d_raw = 0.0f;
   if (dt > 1e-6f) {  // 防止除以零
-  d_term = Kd * (angle_error - pitch_angle_error_previous) / dt;
+  pitch_attitude_d_raw = (pitch_angle_error - pitch_angle_error_previous) / dt;
+  float tau = 1.0f / (2.0f * PI * DTERM_CUTOFF_HZ);
+  float alpha = dt / (dt + tau);
+  Pitch_attitude_dterm_filt += alpha * (pitch_attitude_d_raw - Pitch_attitude_dterm_filt);
   }
 
-  float rate_cmd = Kp * angle_error + Ki * Pitch_angInt + d_term;
+  float rate_cmd = Kp * pitch_angle_error + Ki * Pitch_angInt + Kd * Pitch_attitude_dterm_filt;
   rate_cmd = clampf(rate_cmd, -rate_limit_dps, +rate_limit_dps);
-  pitch_angle_error_previous = angle_error;  // 更新上一次的角度誤差
+  pitch_angle_error_previous = pitch_angle_error;  // 更新上一次的角度誤差
   return rate_cmd;
 }
 
 float attitude_Roll_PID(float angle_cmd_deg, float angle_meas_deg,
-                        float gy_dps, float dt,
-                        float Kp, float Ki, float Kd,
+                        float dt, float Kp, float Ki, float Kd,
                         float rate_limit_dps) {
-  float angle_roll_error = (angle_cmd_deg - angle_meas_deg) * SIGN_ROLL;
 
-  Roll_angInt += angle_roll_error * dt;
+  float roll_angle_error = (angle_cmd_deg - angle_meas_deg) * SIGN_ROLL;
+
+  // I (angle error integral)
+  Roll_angInt += roll_angle_error * dt;
   Roll_angInt = clampf(Roll_angInt, -ANG_INT_LIM_ROLL, +ANG_INT_LIM_ROLL);
 
-  float dterm = -Kd * (gy_dps * SIGN_ROLL);
+  // D (error derivative)
 
-  float rate_cmd = Kp * angle_roll_error + Ki * Roll_angInt + dterm;
+  float roll_attitude_d_raw = 0.0f;
+  if (dt > 1e-6f) {  // 防止除以零
+    roll_attitude_d_raw = (roll_angle_error - roll_angle_error_previous) / dt;
+    float tau = 1.0f / (2.0f * PI * DTERM_CUTOFF_HZ);
+    float alpha = dt / (dt + tau);
+    Roll_attitude_dterm_filt += alpha * (roll_attitude_d_raw - Roll_attitude_dterm_filt);  //filt是上一筆的值
+  }
+
+  float rate_cmd = Kp * roll_angle_error + Ki * Roll_angInt + Kd * Roll_attitude_dterm_filt;
   rate_cmd = clampf(rate_cmd, -rate_limit_dps, +rate_limit_dps);
+
+  roll_angle_error_previous = roll_angle_error;  // 更新上一次的角度誤差
   return rate_cmd;
 }
 //---------------------------------------------------------------------------------------
 
+
+//----------------------------------角速度控制器--------------------------------------
 float Pitch_angle_rate_controller(float gx_dps, float pitch_rate_cmd, float dt){
   float pitch_rate_measure = gx_dps; //實際角速度(deg/s)
   float pitch_rateErr = pitch_rate_cmd - pitch_rate_measure; // 角速度誤差
-  float pitch_command = Pitch_ratePI(pitch_rateErr, dt);   //用PI控制器算出來的pitch指令(deg)
+  float pitch_command = Pitch_ratePID(pitch_rateErr, dt);   //用PI控制器算出來的pitch指令(deg)
   pitch_command = clampf(pitch_command, -(float)SERVO_PITCH_RANGE, +(float)SERVO_PITCH_RANGE);
   return pitch_command;
 }
@@ -277,13 +339,14 @@ float Pitch_angle_rate_controller(float gx_dps, float pitch_rate_cmd, float dt){
 float Roll_angle_rate_controller(float gy_dps, float roll_rate_cmd, float dt){
   float roll_rate_measure = gy_dps; //實際角速度(deg/s)
   float roll_rateErr = roll_rate_cmd - roll_rate_measure; // 角速度誤差
-  float roll_command = Roll_ratePI(roll_rateErr, dt);   //用PI控制器算出來的roll指令(deg)
+  float roll_command = Roll_ratePID(roll_rateErr, dt);   //用PI控制器算出來的roll指令(deg)
   roll_command = clampf(roll_command, -(float)ROLL_DIFF_MAX, +(float)ROLL_DIFF_MAX); // 限幅 
   return roll_command;
 }
+//---------------------------------------------------------------------------------------
 
 void mixer_pitch_servo(float pitch_cmd, float *servo1_deg, float *servo2_deg){
-  pitch_cmd = clampf(pitch_cmd, -20.0f, +20.0f);
+  pitch_cmd = clampf(pitch_cmd, -30.0f, +30.0f);
 
   float s1 = SERVO_CENTER + pitch_cmd;   // 正向
   float s2 = SERVO_CENTER - pitch_cmd;   // 反向
@@ -296,7 +359,7 @@ void mixer_pitch_servo(float pitch_cmd, float *servo1_deg, float *servo2_deg){
 }
 
 void mixer_roll_esc(float thr01, float roll_u, float *esc1, float *esc2) {
-  // roll_u 是差動量（±ROLL_DIFF_MAX），由 Roll_ratePI 輸出
+  // roll_u 是差動量（±ROLL_DIFF_MAX），由 Roll_ratePID 輸出
   float e1 = thr01 + roll_u;   // 左
   float e2 = thr01 - roll_u;   // 右
 
@@ -306,11 +369,11 @@ void mixer_roll_esc(float thr01, float roll_u, float *esc1, float *esc2) {
 
 void outputESCServo(bool is_unlocked, bool valid, float esc1_speed, float esc2_speed, float servo1_deg, float servo2_deg){
   if (!is_unlocked || !valid) {
-    // 真的關閉 PWM 輸出（ESC最安靜）
+    // PWM 輸出
     pwm.setPWM(PCA_ESC_CH1, 0, 0);
     pwm.setPWM(PCA_ESC_CH2, 0, 0);
 
-    // 伺服回中
+    // 伺服回中間
     setServoAngle(PCA_SERVO_CH1, SERVO_CENTER);
     setServoAngle(PCA_SERVO_CH2, SERVO_CENTER);
 
@@ -429,8 +492,8 @@ void loop() {
 
   //-------------------Outer: 角度誤差 -> 目標角速度(使用P控制器) -----內迴路應該達到的角速度目標----------------------
 
-  float pitch_rate_cmd = attitude_Pitch_PID(pitch_cmd_deg, pitch_corr, gx_dps, dt, Kp_pitch_ang, Ki_pitch_ang, Kd_pitch_ang, MAX_PITCH_RATE_DPS); //角速度pitch
-  float roll_rate_cmd = attitude_Roll_PID(roll_cmd_deg, roll_corr, gy_dps, dt, Kp_roll_ang, Ki_roll_ang, Kd_roll_ang, MAX_ROLL_RATE_DPS);  //角速度roll
+  float pitch_rate_cmd = attitude_Pitch_PID(pitch_cmd_deg, pitch_corr, dt, Kp_pitch_ang, Ki_pitch_ang, Kd_pitch_ang, MAX_PITCH_RATE_DPS); //角速度pitch
+  float roll_rate_cmd = attitude_Roll_PID(roll_cmd_deg, roll_corr, dt, Kp_roll_ang, Ki_roll_ang, Kd_roll_ang, MAX_ROLL_RATE_DPS);  //角速度roll
 
   //------------------------------------Outer End---------------------------------------------------------
 
