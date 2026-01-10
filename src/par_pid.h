@@ -83,18 +83,41 @@ static const float SIGN_ROLL  = +1.0f;  // Roll 方向（正負）
 
 // --- Pitch 外迴路（角度誤差 → 角速度命令）---
 static const float Kp_pitch_ang = 5.0f;    // pitch 角度 P 增益（deg/s per deg）
+static const float Ki_pitch_ang = 0.0f;  // 先設0
+static const float Kd_pitch_ang = 0.0f;  // 先設0
+
+// [ADD] 外迴路（角度 loop）積分限幅：防止 wind-up（單位約 deg*s）
+static const float ANG_INT_LIM_PITCH = 30.0f; // [ADD] pitch 外迴路 I 最大累積
 
 // --- Pitch 內迴路（角速度誤差 → 伺服角度輸出）---
 static const float Kp_pitch_rate = 0.12f;  // pitch rate P
 static const float Ki_pitch_rate = 0.04f;  // pitch rate I
 
+// [ADD] 內迴路（rate loop）D term：先設 0 => 行為仍是 PI
+static const float Kd_pitch_rate = 0.0f;   // [ADD] pitch rate D（先設0）
+static const float DTERM_CUTOFF_HZ = 30.0f; // [ADD] D 濾波截止頻率（Hz）建議 20~50
+
 // --- Roll 外迴路（角度誤差 → 角速度命令）---
 static const float Kp_roll_ang = 5.0f;     // roll 角度 P 增益
+
+// [ADD] Roll 外迴路 PID（先設0 => 仍是 P）
+static const float Ki_roll_ang = 0.0f;     // [ADD] roll 外迴路 I（先設0）
+static const float Kd_roll_ang = 0.0f;     // [ADD] roll 外迴路 D（先設0）
+
+// [ADD] 外迴路（角度 loop）積分限幅：防止 wind-up
+static const float ANG_INT_LIM_ROLL = 30.0f; // [ADD] roll 外迴路 I 最大累積
 
 // --- Roll 內迴路（角速度誤差 → 左右油門差動量）---
 static const float Kp_roll_rate = 0.0020f; // roll rate P（輸出是油門差動，所以要小）
 static const float Ki_roll_rate = 0.0008f; // roll rate I
 static const float ROLL_DIFF_MAX = 0.20f;  // 最大差動油門幅度（±0.2）
+
+// [ADD] 內迴路（rate loop）D term：先設 0 => 行為仍是 PI
+static const float Kd_roll_rate = 0.0f;    // [ADD] roll rate D（先設0）
+
+extern float pitch_angle_error_previous; //用於紀錄上一次迴圈之誤差值
+extern float roll_angle_error_previous; //用於紀錄上一次迴圈之誤差值
+
 
 // =======================================================
 // 9) 校正相關參數
@@ -106,25 +129,35 @@ static const uint16_t gyroCalibSamples = 300; // 陀螺儀 bias 校正取樣次�
 // =======================================================
 
 // SBUS
-HardwareSerial &sbusSerial = Serial1;  // SBUS
-uint8_t  sbusBuf[SBUS_FRAME_SIZE];
-uint16_t sbusCh[16];
-bool     haveFrame;
-uint32_t lastSbusMs;
+extern HardwareSerial &sbusSerial;  // SBUS
+extern uint8_t  sbusBuf[SBUS_FRAME_SIZE];
+extern uint16_t sbusCh[16];
+extern bool     haveFrame;
+extern uint32_t lastSbusMs;
 
 // 姿態角（估測）
-float pitch_deg, roll_deg, yaw_deg;
+extern float pitch_deg, roll_deg, yaw_deg;
 
 // 零點 offset（按 CH_CALIB 校正）
-float pitch_offset, roll_offset;
-bool  calibPrevActive;
+extern float pitch_offset, roll_offset;
+extern bool  calibPrevActive;
 
 // Gyro bias
-float gx_bias, gy_bias, gz_bias;
+extern float gx_bias, gy_bias, gz_bias;
 
-// PI 狀態
-float Pitch_rateInt;
-float Roll_rateInt;
+// PI 狀態 積分記憶
+extern float Pitch_rateInt;
+extern float Roll_rateInt;
+
+// [ADD] 外迴路（角度 loop）I 狀態（Ki=0 時不影響）
+extern float Pitch_angInt;   // [ADD]
+extern float Roll_angInt;    // [ADD]
+
+// [ADD] 內迴路（rate loop）D 狀態（Kd=0 時不影響）
+extern float Pitch_rateErrPrev; // [ADD]
+extern float Roll_rateErrPrev;  // [ADD]
+extern float Pitch_dterm_filt;  // [ADD]
+extern float Roll_dterm_filt;   // [ADD]
 
 // loop timing
-int lastLoopUs;
+extern int lastLoopUs;

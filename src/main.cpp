@@ -7,15 +7,36 @@
 
 Adafruit_PWMServoDriver pwm(PCA_ADDR);  // PCA9685 address
 ICM_20948_I2C myICM;  // IMU
+HardwareSerial &sbusSerial = Serial1;  // SBUS
+uint8_t  sbusBuf[SBUS_FRAME_SIZE];
+uint16_t sbusCh[16];
+bool     haveFrame = false;
+uint32_t lastSbusMs = 0;
+//---------------------------參數在main.cpp宣告---------------------------
+// 姿態角（估測）
+float pitch_deg = 0.0f, roll_deg = 0.0f, yaw_deg = 0.0f;
+// 零點 offset（按 CH_CALIB 校正）
+float pitch_offset = 0.0f, roll_offset = 0.0f;
+bool  calibPrevActive = false;
+// Gyro bias
+float gx_bias = 0.0f, gy_bias = 0.0f, gz_bias = 0.0f;
+// PI 狀態 積分記憶
+float Pitch_rateInt = 0.0f, Roll_rateInt  = 0.0f;
+// [ADD] 外迴路（角度 loop）I 狀態（Ki=0 時不影響）
+float Pitch_angInt = 0.0f, Roll_angInt = 0.0f;   // [ADD]
+//內迴路（rate loop）D 狀態（Kd=0 時不影響）
+float Pitch_rateErrPrev = 0.0f, Roll_rateErrPrev = 0.0f; // [ADD]
+float Pitch_dterm_filt  = 0.0f, Roll_dterm_filt  = 0.0f; // [ADD]
+// 用於紀錄上一次迴圈之誤差值
+float pitch_angle_error_previous = 0.0f, roll_angle_error_previous = 0.0f;
+// loop timing
+int lastLoopUs = 0;
+//---------------------------參數宣告結束---------------------------
   
 static inline float clampf(float x, float low, float high) {  //限制大小的function；inline :單行描述函數(直接展開)
   if (x < low) return low;    
   if (x > high) return high;
   return x;
-}
-int test()
-{
-    return 0;
 }
 
 void locked(){
@@ -167,18 +188,28 @@ float Pitch_ratePI(float pitch_rateErr, float dt) {  //PI控制器(內迴路)
 float Roll_ratePI(float rateErr, float dt) {
   Roll_rateInt += rateErr * dt;
   Roll_rateInt = clampf(Roll_rateInt, -300.0f, 300.0f);
-
   float u = Kp_roll_rate * rateErr + Ki_roll_rate * Roll_rateInt;
-
   
   u = clampf(u, -ROLL_DIFF_MAX, +ROLL_DIFF_MAX); // 限制差動推力幅度
   return u;   // 回傳「左右油門差動量」
 }
 
-void resetPI() {  //重置PI控制器積分值
+void resetPI() {
+  // inner-loop I
   Pitch_rateInt = 0.0f;
-  Roll_rateInt = 0.0f;
+  Roll_rateInt  = 0.0f;
+
+  // outer-loop I
+  Pitch_angInt = 0.0f;
+  Roll_angInt  = 0.0f;
+
+  // inner-loop D states (if you already added D in rate loop)
+  Pitch_rateErrPrev = 0.0f;
+  Roll_rateErrPrev  = 0.0f;
+  Pitch_dterm_filt  = 0.0f;
+  Roll_dterm_filt   = 0.0f;
 }
+
 
 void ZeroCalibration(bool valid, int calib_raw, float pitch_deg, float roll_deg) {
   if (!valid) return;
@@ -196,20 +227,42 @@ void ZeroCalibration(bool valid, int calib_raw, float pitch_deg, float roll_deg)
 }
 
 //----------------------------------姿態控制器------------------------------------------- 
-float attitude_Pitch_PID(float angle_cmd_deg, float angle_meas_deg, float Kp, float rate_limit_dps){
-    float angle_error = (angle_cmd_deg - angle_meas_deg) * SIGN_PITCH;
-    // 比例控制：角度 → 角速度命令
-    float rate_cmd = Kp * angle_error;  //過P控制器算出角速度指令
-    // 限幅
-    rate_cmd = clampf(rate_cmd, -rate_limit_dps, rate_limit_dps);
-    return rate_cmd; // 回傳角速度指令
+float attitude_Pitch_PID(float angle_cmd_deg, float angle_meas_deg,
+                         float gx_dps, float dt,
+                         float Kp, float Ki, float Kd,
+                         float rate_limit_dps) {
+  float angle_error = (angle_cmd_deg - angle_meas_deg) * SIGN_PITCH;
+
+  // I (angle error integral)
+  Pitch_angInt += angle_error * dt;
+  Pitch_angInt = clampf(Pitch_angInt, -ANG_INT_LIM_PITCH, +ANG_INT_LIM_PITCH);
+
+  // D (use measured angular rate; avoids derivative kick)
+  float d_term = 0.0f;
+  if (dt > 1e-6f) {  // 防止除以零
+  d_term = Kd * (angle_error - pitch_angle_error_previous) / dt;
+  }
+
+  float rate_cmd = Kp * angle_error + Ki * Pitch_angInt + d_term;
+  rate_cmd = clampf(rate_cmd, -rate_limit_dps, +rate_limit_dps);
+  pitch_angle_error_previous = angle_error;  // 更新上一次的角度誤差
+  return rate_cmd;
 }
 
-float attitude_Roll_PID(float angle_cmd_deg, float angle_meas_deg, float Kp, float rate_limit_dps){
-    float angle_error = (angle_cmd_deg - angle_meas_deg) * SIGN_ROLL; // ★用 SIGN_ROLL
-    float rate_cmd = Kp * angle_error;
-    rate_cmd = clampf(rate_cmd, -rate_limit_dps, rate_limit_dps);
-    return rate_cmd;
+float attitude_Roll_PID(float angle_cmd_deg, float angle_meas_deg,
+                        float gy_dps, float dt,
+                        float Kp, float Ki, float Kd,
+                        float rate_limit_dps) {
+  float angle_roll_error = (angle_cmd_deg - angle_meas_deg) * SIGN_ROLL;
+
+  Roll_angInt += angle_roll_error * dt;
+  Roll_angInt = clampf(Roll_angInt, -ANG_INT_LIM_ROLL, +ANG_INT_LIM_ROLL);
+
+  float dterm = -Kd * (gy_dps * SIGN_ROLL);
+
+  float rate_cmd = Kp * angle_roll_error + Ki * Roll_angInt + dterm;
+  rate_cmd = clampf(rate_cmd, -rate_limit_dps, +rate_limit_dps);
+  return rate_cmd;
 }
 //---------------------------------------------------------------------------------------
 
@@ -376,8 +429,8 @@ void loop() {
 
   //-------------------Outer: 角度誤差 -> 目標角速度(使用P控制器) -----內迴路應該達到的角速度目標----------------------
 
-  float pitch_rate_cmd = attitude_Pitch_PID(pitch_cmd_deg, pitch_corr, Kp_pitch_ang, MAX_PITCH_RATE_DPS); 
-  float roll_rate_cmd = attitude_Roll_PID(roll_cmd_deg, roll_corr, Kp_roll_ang, MAX_ROLL_RATE_DPS);
+  float pitch_rate_cmd = attitude_Pitch_PID(pitch_cmd_deg, pitch_corr, gx_dps, dt, Kp_pitch_ang, Ki_pitch_ang, Kd_pitch_ang, MAX_PITCH_RATE_DPS); //角速度pitch
+  float roll_rate_cmd = attitude_Roll_PID(roll_cmd_deg, roll_corr, gy_dps, dt, Kp_roll_ang, Ki_roll_ang, Kd_roll_ang, MAX_ROLL_RATE_DPS);  //角速度roll
 
   //------------------------------------Outer End---------------------------------------------------------
 
