@@ -4,7 +4,9 @@
 #include "ICM_20948.h"
 #include <math.h>
 #include "par_pid.h"  
+#include <MadgwickAHRS.h>
 
+Madgwick filter;
 Adafruit_PWMServoDriver pwm(PCA_ADDR);  // PCA9685 address
 ICM_20948_I2C myICM;  // IMU
 HardwareSerial &sbusSerial = Serial1;  // SBUS
@@ -33,19 +35,15 @@ float Pitch_rate_dterm_filt = 0.0f, Roll_rate_dterm_filt = 0.0f;
 float pitch_angle_error_previous = 0.0f, roll_angle_error_previous = 0.0f;
 // loop timing
 int lastLoopUs = 0;
+
+float pitchStick;
+float rollStick;
 //---------------------------參數宣告結束---------------------------
   
 static inline float clampf(float x, float low, float high) {  //限制大小的function；inline :單行描述函數(直接展開)
   if (x < low) return low;    
   if (x > high) return high;
   return x;
-}
-
-void locked(){
-  pwm.setPWM(PCA_SERVO_CH1, 0, SERVO_MIN_TICK);
-  pwm.setPWM(PCA_SERVO_CH2, 0, SERVO_MIN_TICK);
-  pwm.setPWM(PCA_ESC_CH1, 0, 0);
-  pwm.setPWM(PCA_ESC_CH2, 0, 0);
 }
 
 static inline float wrapAngle180(float degree) {   //將角度限制在+-180度
@@ -156,23 +154,23 @@ void readIMU(float &axg, float &ayg, float &azg, float &gx_dps, float &gy_dps, f
     azg = az_mg / 1000.0f;
 }
 
-void updateAttitudeComplementary(float gx_dps, float gy_dps, float gz_dps, float accPitch, float accRoll, float dt, float &pitch_deg, 
-  float &roll_deg, float &yaw_deg) {
-    // Gyro 積分（短時間內姿態推算）
-    float pitch_gyro = pitch_deg + gx_dps * dt;
-    float roll_gyro  = roll_deg  + gy_dps * dt;
-    float yaw_gyro   = yaw_deg   + gz_dps * dt;
+// void updateAttitudeComplementary(float gx_dps, float gy_dps, float gz_dps, float accPitch, float accRoll, float dt, float &pitch_deg, 
+//   float &roll_deg, float &yaw_deg) {
+//     // Gyro 積分（短時間內姿態推算）
+//     float pitch_gyro = pitch_deg + gx_dps * dt;
+//     float roll_gyro  = roll_deg  + gy_dps * dt;
+//     float yaw_gyro   = yaw_deg   + gz_dps * dt;
 
-    // 互補濾波（融合加速度計）
-    pitch_deg = COMPLEMENTARY_ALPHA * pitch_gyro
-              + (1.0f - COMPLEMENTARY_ALPHA) * accPitch;
+//     // 互補濾波（融合加速度計）
+//     pitch_deg = COMPLEMENTARY_ALPHA * pitch_gyro
+//               + (1.0f - COMPLEMENTARY_ALPHA) * accPitch;
 
-    roll_deg  = COMPLEMENTARY_ALPHA * roll_gyro
-              + (1.0f - COMPLEMENTARY_ALPHA) * accRoll;
+//     roll_deg  = COMPLEMENTARY_ALPHA * roll_gyro
+//               + (1.0f - COMPLEMENTARY_ALPHA) * accRoll;
 
-    // yaw 沒有加速度參考，只做 gyro 積分
-    yaw_deg = wrapAngle180(yaw_gyro);
-}
+//     // yaw 沒有加速度參考，只做 gyro 積分
+//     yaw_deg = wrapAngle180(yaw_gyro);
+// }
 
 
 void calibrateGyroBias() { //校正一開始的偏移
@@ -191,10 +189,16 @@ void calibrateGyroBias() { //校正一開始的偏移
   Serial.println("IMU校正成功。");
 }
 
-float Pitch_ratePID(float pitch_rateErr, float dt) {  //PI控制器(內迴路)
+float Pitch_ratePID(float pitch_rateErr, float dt, float thr01, bool allow_integrate) {  //PI控制器(內迴路)
   // I
-  Pitch_rateInt += pitch_rateErr * dt; //積分
-  Pitch_rateInt = clampf(Pitch_rateInt, -300.0f, 300.0f);  //積分限幅防止wind-up
+  if (allow_integrate) {
+    Pitch_rateInt += pitch_rateErr * dt;
+    Pitch_rateInt = clampf(Pitch_rateInt, -25.0f, 25.0f);
+  }
+  if (thr01 < 0.25f) {   // 接近地面(油門較低時，重置積分)
+    Roll_rateInt = 0.0f;
+    Pitch_rateInt = 0.0f;
+  }
 
   // D = d(error)/dt  (加 dt 保護 + 濾波)
   pitch_rate_dterm = 0.0f; //微分
@@ -214,14 +218,19 @@ float Pitch_ratePID(float pitch_rateErr, float dt) {  //PI控制器(內迴路)
 }
 
 
-float Roll_ratePID(float rateErr, float dt) {
-  Roll_rateInt += rateErr * dt;
-  Roll_rateInt = clampf(Roll_rateInt, -300.0f, 300.0f);
-
+float Roll_ratePID(float roll_rateErr, float dt, float thr01, bool allow_integrate) {
+  if (allow_integrate) {
+    Roll_rateInt += roll_rateErr * dt;
+    Roll_rateInt = clampf(Roll_rateInt, -25.0f, 25.0f);
+  }
+  if (thr01 < 0.35f) {   // 接近地面
+      Roll_rateInt = 0.0f;
+      Pitch_rateInt = 0.0f;
+  }
   // D = d(error)/dt（加 dt 保護 + 濾波）
   roll_rate_dterm = 0.0f;
   if (dt > 1e-6f) { // 防止除以零
-    float d_raw = (rateErr - Roll_rateErrPrev) / dt;
+    float d_raw = (roll_rateErr - Roll_rateErrPrev) / dt;
 
 
     float tau = 1.0f / (2.0f * PI * DTERM_CUTOFF_HZ);
@@ -231,9 +240,9 @@ float Roll_ratePID(float rateErr, float dt) {
     roll_rate_dterm = Roll_rate_dterm_filt;
 
   }
-  Roll_rateErrPrev = rateErr;
+  Roll_rateErrPrev = roll_rateErr;
 
-  float u = Kp_roll_rate * rateErr + Ki_roll_rate * Roll_rateInt + Kd_roll_rate * roll_rate_dterm;  //回傳控制量;
+  float u = Kp_roll_rate * roll_rateErr + Ki_roll_rate * Roll_rateInt + Kd_roll_rate * roll_rate_dterm;  //回傳控制量;
   u = clampf(u, -ROLL_DIFF_MAX, +ROLL_DIFF_MAX); // 限制差動推力幅度
   return u;   // 回傳「左右油門差動量」
 }
@@ -328,18 +337,46 @@ float attitude_Roll_PID(float angle_cmd_deg, float angle_meas_deg,
 
 
 //----------------------------------角速度控制器--------------------------------------
-float Pitch_angle_rate_controller(float gx_dps, float pitch_rate_cmd, float dt){
+float Pitch_angle_rate_controller(float gx_dps, float pitch_rate_cmd, float dt, float thr01){
   float pitch_rate_measure = gx_dps; //實際角速度(deg/s)
   float pitch_rateErr = pitch_rate_cmd - pitch_rate_measure; // 角速度誤差
-  float pitch_command = Pitch_ratePID(pitch_rateErr, dt);   //用PI控制器算出來的pitch指令(deg)
+
+  bool stick_center   = (fabs(pitchStick) < STICK_CENTER_DB);
+  bool rate_cmd_small = (fabs(pitch_rate_cmd) < RATE_CMD_DB_DPS);
+//   bool gyro_small     = (fabs(gx_dps) < GYRO_DB_DPS);
+
+  bool settled = (stick_center && rate_cmd_small);
+
+  // settled 時不要再積分（不然又加回去）
+  bool allow_integrate = !settled;
+
+  float pitch_command = Pitch_ratePID(pitch_rateErr, dt, thr01, allow_integrate);   //用PI控制器算出來的pitch指令(deg)
+
+  if (settled) {
+    Pitch_rateInt *= I_DECAY;   // 建議 I_DECAY 先用 0.995 / 0.99 讓你「看得到」
+  }
+
   pitch_command = clampf(pitch_command, -(float)SERVO_PITCH_RANGE, +(float)SERVO_PITCH_RANGE);
   return pitch_command;
 }
 
-float Roll_angle_rate_controller(float gy_dps, float roll_rate_cmd, float dt){
+float Roll_angle_rate_controller(float gy_dps, float roll_rate_cmd, float dt, float thr01){
   float roll_rate_measure = gy_dps; //實際角速度(deg/s)
   float roll_rateErr = roll_rate_cmd - roll_rate_measure; // 角速度誤差
-  float roll_command = Roll_ratePID(roll_rateErr, dt);   //用PI控制器算出來的roll指令(deg)
+
+  bool stick_center   = (fabs(rollStick) < STICK_CENTER_DB);
+  bool rate_cmd_small = (fabs(roll_rate_cmd) < RATE_CMD_DB_DPS);
+  bool gyro_small     = (fabs(gy_dps) < GYRO_DB_DPS);
+
+  bool settled = (stick_center && rate_cmd_small && gyro_small);
+  bool allow_integrate = !settled;
+
+  float roll_command = Roll_ratePID(roll_rateErr, dt, thr01, allow_integrate);   //用PI控制器算出來的roll指令(deg)
+
+
+  if (settled) {
+    Roll_rateInt *= I_DECAY;   // 建議 I_DECAY 先用 0.995 / 0.99 讓你「看得到」
+  }
   roll_command = clampf(roll_command, -(float)ROLL_DIFF_MAX, +(float)ROLL_DIFF_MAX); // 限幅 
   return roll_command;
 }
@@ -370,8 +407,8 @@ void mixer_roll_esc(float thr01, float roll_u, float *esc1, float *esc2) {
 void outputESCServo(bool is_unlocked, bool valid, float esc1_speed, float esc2_speed, float servo1_deg, float servo2_deg){
   if (!is_unlocked || !valid) {
     // PWM 輸出
-    pwm.setPWM(PCA_ESC_CH1, 0, 0);
-    pwm.setPWM(PCA_ESC_CH2, 0, 0);
+    setESC01(PCA_ESC_CH1, 0.0f); 
+    setESC01(PCA_ESC_CH2, 0.0f); 
 
     // 伺服回中間
     setServoAngle(PCA_SERVO_CH1, SERVO_CENTER);
@@ -387,6 +424,12 @@ void outputESCServo(bool is_unlocked, bool valid, float esc1_speed, float esc2_s
   setServoAngle(PCA_SERVO_CH2, servo2_deg);
 }
 
+void locked(){
+  setServoAngle(PCA_SERVO_CH1, SERVO_CENTER);
+  setServoAngle(PCA_SERVO_CH2, SERVO_CENTER);
+  setESC01(PCA_ESC_CH1, 0.0f);
+  setESC01(PCA_ESC_CH2, 0.0f);
+}
 void setup() {
   Serial.begin(115200);
   delay(100);
@@ -406,6 +449,8 @@ void setup() {
   }
   calibrateGyroBias();  //校正gyro bias
 
+  filter.begin(LOOP_HZ);   //初始化MadgwickAHRS
+
   myICM.getAGMT();  //取得初始加速度計數值以計算初始角度
   float ax = myICM.accX() / 1000.0f;
   float ay = myICM.accY() / 1000.0f;
@@ -424,7 +469,7 @@ void setup() {
   // init Servo
   setServoAngle(PCA_SERVO_CH1, SERVO_CENTER);
   setServoAngle(PCA_SERVO_CH2, SERVO_CENTER);
-
+  delay(3000); // 等待3秒使ESC解鎖
   lastLoopUs = micros();
 
   Serial.println("SBUS + ICM20948 + Cascaded PI (Pitch+Roll) 控制器啟動完成。");
@@ -456,10 +501,18 @@ void loop() {
   // ------------------------------------------
 
   // 計算角度
-  float accPitch = atan2f(ayg, sqrtf(axg*axg + azg*azg)) * 180.0f / PI; 
-  float accRoll  = atan2f(-axg, azg) * 180.0f / PI;
+  float gx = gx_dps * DEG_TO_RAD;
+  float gy = gy_dps * DEG_TO_RAD;
+  float gz = gz_dps * DEG_TO_RAD;
 
-  updateAttitudeComplementary(gx_dps, gy_dps, gz_dps, accPitch, accRoll, dt, pitch_deg, roll_deg, yaw_deg);  //更新姿態角(加上互補濾波)
+  // update Madgwick (IMU: no magnetometer)
+  filter.updateIMU(gx, gy, gz, axg, ayg, azg);
+
+  // 取出 Euler（不同 library 命名可能不同）
+  roll_deg  = filter.getRoll();
+  pitch_deg = filter.getPitch();
+  yaw_deg   = filter.getYaw();  
+  yaw_deg   = wrapAngle180(yaw_deg);
 
   // ---------------- CH8零點校正----------------
   int calib_raw = sbusCh[CH_CALIB];
@@ -473,15 +526,17 @@ void loop() {
   if (valid) {
     //油門0.3~1
     thr01 = sbusTo01((int)sbusCh[CH_THROTTLE]);
-    const float THR_MIN = 0.30f;
+    const float THR_MIN = 0.20f;
     thr01 = THR_MIN + thr01 * (1.0f - THR_MIN);
     thr01 = clampf(thr01, THR_MIN, 1.0f);
 
     // pitch指令-1到1
-    float pitchStick = sbus_normalize((int)sbusCh[CH_PITCH]);
+    pitchStick = sbus_normalize((int)sbusCh[CH_PITCH]);
+    if (fabs(pitchStick) < 0.05f) pitchStick = 0.0f;   // 防止deadband持續積分
     pitch_cmd_deg = pitchStick * PITCH_CMD_MAX_DEG;
 
-    float rollStick = sbus_normalize((int)sbusCh[CH_ROLL]);
+    rollStick = sbus_normalize((int)sbusCh[CH_ROLL]);
+    if (fabs(rollStick) < 0.05f) rollStick = 0.0f;   // 防止deadband持續積分
     roll_cmd_deg = rollStick * ROLL_CMD_MAX_DEG;
   }
 
@@ -500,9 +555,9 @@ void loop() {
 
   // ----------------Inner: 角速度誤差 -> pitch的輸出指令(使用PI控制器)  -------------------------
 
-  float pitch_output_servo = Pitch_angle_rate_controller(gx_dps, pitch_rate_cmd, dt); // 輸出最終pitch角度控制指令
-  float roll_output_throttle = Roll_angle_rate_controller(gy_dps, roll_rate_cmd, dt); // 輸出最終roll角度控制指令
-  
+  float pitch_output_servo = Pitch_angle_rate_controller(gx_dps, pitch_rate_cmd, dt, thr01); // 輸出最終pitch角度控制指令
+  float roll_output_throttle = Roll_angle_rate_controller(gy_dps, roll_rate_cmd, dt, thr01); // 輸出最終roll角度控制指令
+
   //------------------------------------Inner End---------------------------------------------------------
 
   //------------------ Mixer ------------------
@@ -514,7 +569,6 @@ void loop() {
   mixer_roll_esc(thr01, roll_output_throttle, &esc1_speed, &esc2_speed); //計算兩個ESC調整之速度值
 
   //------------------ Mixer End ------------------
-
 
   // ---------------- ESC & Servo 輸出----------------
   outputESCServo(is_unlocked, valid, esc1_speed, esc2_speed, servo1_deg, servo2_deg);
@@ -528,19 +582,24 @@ void loop() {
     Serial.print("油門: "); Serial.print(thr01, 3);
     Serial.print(" | pitch實際角: "); Serial.print(pitch_corr, 2);
     Serial.print(" | p目標角: "); Serial.print(pitch_cmd_deg, 2);
-    Serial.print(" | pitch實際輸出(deg): ");    Serial.print(pitch_output_servo, 2);
+    // Serial.print(" | pitch實際輸出(deg): ");    Serial.print(pitch_output_servo, 2);
 
     Serial.print(" | roll實際角: "); Serial.print(roll_corr, 2);
     Serial.print(" | r目標角: "); Serial.print(roll_cmd_deg, 2);
 
-    Serial.print(" | gx(角速度,deg/s): "); Serial.print(gx_dps, 2);
-    Serial.print(" | gy(角速度,deg/s): "); Serial.print(gy_dps, 2);
+    // Serial.print(" | gx(角速度,deg/s): "); Serial.print(gx_dps, 2);
+    // Serial.print(" | gy(角速度,deg/s): "); Serial.print(gy_dps, 2);
     Serial.print(" | rate_cmd(目標角速度,deg/s): "); Serial.print(pitch_rate_cmd, 2);
 
     Serial.print(" | 左伺服角: "); Serial.print(servo1_deg, 1);
     Serial.print(" | 右伺服角: "); Serial.print(servo2_deg, 1);
     Serial.print(" | 左ESC速度: "); Serial.print(esc1_speed, 2);
     Serial.print(" | 右ESC速度: "); Serial.print(esc2_speed, 2);
+    // Serial.print(" pitch stick: "); Serial.print(pitchStick, 2);
+    // Serial.print(" roll stick: "); Serial.print(rollStick, 2);
+    // Serial.print("|  pitch stick: "); Serial.print(pitchStick, 2);
+    Serial.print(" | Roll_rateInt: "); Serial.print(Roll_rateInt, 2);
+    Serial.print(" | pitch_rateInt: "); Serial.print(Pitch_rateInt, 2);
     Serial.println();
   }
 }
