@@ -195,6 +195,10 @@ float Pitch_ratePID(float pitch_rateErr, float dt, float thr01, bool allow_integ
     Pitch_rateInt += pitch_rateErr * dt;
     Pitch_rateInt = clampf(Pitch_rateInt, -25.0f, 25.0f);
   }
+  else {
+    Pitch_rateInt *= I_DECAY; 
+  }
+
   if (thr01 < 0.25f) {   // 接近地面(油門較低時，重置積分)
     Roll_rateInt = 0.0f;
     Pitch_rateInt = 0.0f;
@@ -223,7 +227,11 @@ float Roll_ratePID(float roll_rateErr, float dt, float thr01, bool allow_integra
     Roll_rateInt += roll_rateErr * dt;
     Roll_rateInt = clampf(Roll_rateInt, -25.0f, 25.0f);
   }
-  if (thr01 < 0.35f) {   // 接近地面
+    else {
+        Roll_rateInt *= I_DECAY; 
+    }
+
+  if (thr01 < 0.25f) {   // 接近地面
       Roll_rateInt = 0.0f;
       Pitch_rateInt = 0.0f;
   }
@@ -290,6 +298,14 @@ float attitude_Pitch_PID(float angle_cmd_deg, float angle_meas_deg,
   float pitch_angle_error = (angle_cmd_deg - angle_meas_deg) * SIGN_PITCH;
 
   // I (angle error integral)
+  if(allow_integrate) {
+    Pitch_angInt += pitch_angle_error * dt;
+    Pitch_angInt = clampf(Pitch_angInt, -ANG_INT_LIM_PITCH, +ANG_INT_LIM_PITCH);
+  }
+  else {
+      Pitch_angInt *= I_DECAY; 
+  }
+    // D (error derivative)
   Pitch_angInt += pitch_angle_error * dt;
   Pitch_angInt = clampf(Pitch_angInt, -ANG_INT_LIM_PITCH, +ANG_INT_LIM_PITCH);
 
@@ -314,8 +330,13 @@ float attitude_Roll_PID(float angle_cmd_deg, float angle_meas_deg,
   float roll_angle_error = (angle_cmd_deg - angle_meas_deg) * SIGN_ROLL;
 
   // I (angle error integral)
-  Roll_angInt += roll_angle_error * dt;
-  Roll_angInt = clampf(Roll_angInt, -ANG_INT_LIM_ROLL, +ANG_INT_LIM_ROLL);
+  if (allow_integrate) {
+    Roll_angInt += roll_angle_error * dt;
+    Roll_angInt = clampf(Roll_angInt, -ANG_INT_LIM_ROLL, +ANG_INT_LIM_ROLL);
+  }
+    else {
+        Roll_angInt *= I_DECAY; 
+    }
 
   // D (error derivative)
 
@@ -348,13 +369,13 @@ float Pitch_angle_rate_controller(float gx_dps, float pitch_rate_cmd, float dt, 
   bool settled = (stick_center && rate_cmd_small);
 
   // settled 時不要再積分（不然又加回去）
-  bool allow_integrate = !settled;
+  allow_integrate = !settled;
 
   float pitch_command = Pitch_ratePID(pitch_rateErr, dt, thr01, allow_integrate);   //用PI控制器算出來的pitch指令(deg)
 
-  if (settled) {
-    Pitch_rateInt *= I_DECAY;   // 建議 I_DECAY 先用 0.995 / 0.99 讓你「看得到」
-  }
+//   if (settled) {
+//     Pitch_rateInt *= I_DECAY;   // 建議 I_DECAY 先用 0.995 / 0.99 讓你「看得到」
+//   }
 
   pitch_command = clampf(pitch_command, -(float)SERVO_PITCH_RANGE, +(float)SERVO_PITCH_RANGE);
   return pitch_command;
@@ -374,9 +395,9 @@ float Roll_angle_rate_controller(float gy_dps, float roll_rate_cmd, float dt, fl
   float roll_command = Roll_ratePID(roll_rateErr, dt, thr01, allow_integrate);   //用PI控制器算出來的roll指令(deg)
 
 
-  if (settled) {
-    Roll_rateInt *= I_DECAY;   // 建議 I_DECAY 先用 0.995 / 0.99 讓你「看得到」
-  }
+//   if (settled) {
+//     Roll_rateInt *= I_DECAY;   // 建議 I_DECAY 先用 0.995 / 0.99 讓你「看得到」
+//   }
   roll_command = clampf(roll_command, -(float)ROLL_DIFF_MAX, +(float)ROLL_DIFF_MAX); // 限幅 
   return roll_command;
 }

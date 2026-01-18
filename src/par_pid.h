@@ -171,4 +171,5 @@ static const float GYRO_DB_DPS     = 5.0f;    // 實際角速度 < 5 deg/s 視�
 
 // 400Hz衰減係數
 static const float I_DECAY= 0.98f;    // 慢衰 (約幾秒才明顯)
+extern bool allow_integrate; // 是否允許積分
 // static const float I_DECAY_FAST = 0.9950f;    // 快衰 (約 0.5~1 秒就很明顯)
