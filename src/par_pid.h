@@ -1,134 +1,171 @@
+#ifndef PAR_PID_H
+#define PAR_PID_H
+
+#include <Adafruit_PWMServoDriver.h>
+#include "ICM_20948.h"
+#include <MadgwickAHRS.h>
+#include <Adafruit_NeoPixel.h>
+
+
+
+
 // =======================================================
-// 1) 腳位 / 匯流排設定
+// 腳位設定
 // =======================================================
 #define SDA_PIN 21              // I2C SDA 腳位
 #define SCL_PIN 47              // I2C SCL 腳位
 #define DBG_PIN 4              // DEBUG 腳位
-#define START_PIN 48             // START 腳位
+#define START_PIN 48  //RGB
 
 // =======================================================
-// 2) PCA9685（PWM 擴展板）設定
+//  PCA9685設定
 // =======================================================
-#define PCA_ADDR 0x40           // PCA9685 I2C 位址
-#define SERVO_FREQ 50        // PCA9685 PWM 頻率（伺服/ESC 常用 50Hz）
+#define PCA_ADDR 0x40           //I2C
+#define SERVO_FREQ 50        //PWM頻率
 
-// PCA9685 通道分配
-#define PCA_ESC_CH1    12        // ESC 1（左馬達）
-#define PCA_ESC_CH2     0       // ESC 2（右馬達）
-#define PCA_SERVO_CH1  1      // Servo 1（左伺服）
-#define PCA_SERVO_CH2  13
-      // Servo 2（右伺服）
+//PCA9685通道
+#define PCA_ESC_CH1    1       // ESC 1左馬達
+#define PCA_ESC_CH2     13        // ESC 2 右馬達
+#define PCA_SERVO_CH1  0      // Servo 1 左伺服
+#define PCA_SERVO_CH2  15    // Servo 2 右伺服
 
-// PCA tick 範圍（你目前用來 map 的參數）
+// us範圍
 #define SERVO_MIN_US 1000.0f
 #define SERVO_MAX_US 2000.0f
-// extern int SERVO_MIN_TICK;     // 伺服輸出最小 tick（對應最小角60度）
-// extern int SERVO_MAX_TICK;     // 伺服輸出最大 tick（對應最大角120度）
-// #define STICK_MIN_50HZ 102      // 你定義的 50Hz 下搖桿最小 tick
-// #define STICK_MAX_50HZ 512      // 你定義的 50Hz 下搖桿最大 tick
 
 // =======================================================
-// 3) 伺服機械角度限制（物理結構安全範圍）
+// servo角度限制
 // =======================================================
-#define SERVO_MIN_ANG 50        // 伺服最小角度
-#define SERVO_MAX_ANG 130      // 伺服最大角度
-#define SERVO_CENTER  90        // 伺服中立角度
-#define SERVO_PITCH_RANGE 40    // 伺服最大輸出範圍（±40 度）
+#define SERVO_MIN_ANG 50        //伺服最小角度
+#define SERVO_MAX_ANG 130      //伺服最大角度
+#define SERVO_CENTER  90        //伺服中立角度
+#define SERVO_PITCH_RANGE 40    //伺服最大輸出範圍
 
 // =======================================================
-// 4) IMU（ICM-20948）設定
+// IMU設定
 // =======================================================
-#define ICM_ADDRESS 0x69        // ICM20948 位址（依 AD0 可能是 0x68 或 0x69）
-static const float COMPLEMENTARY_ALPHA = 0.98f;   // 互補濾波：陀螺權重（越大越信任 gyro）
+#define ICM_ADDRESS 0x69        // ICM20948位址（依 AD0 可能是 0x68 或 0x69）
 
 // =======================================================
-// 5) 控制迴圈頻率
+// 控制迴圈頻率
 // =======================================================
-static const float LOOP_HZ = 400.0f;              // 控制迴圈頻率（Hz）
-static const int   LOOP_DT_US = (int)(1000000.0f / LOOP_HZ);  // 每次 loop 的週期（微秒）
+static const float LOOP_HZ = 400.0f;    //控制迴圈頻率（Hz）
+static const int   LOOP_DT_US = (int)(1000000.0f / LOOP_HZ);  //loop的週期（微秒）
 
 // =======================================================
-// 6) SBUS 接收設定
+// SBUS接收設定
 // =======================================================
-#define SBUS_FRAME_SIZE 25       // SBUS frame 長度固定 25 bytes
+#define SBUS_FRAME_SIZE 25       // SBUS frame 25 bytes
 static const int SBUS_RX_PIN = 10;     // SBUS RX 腳位
 static const int SBUS_BAUD   = 100000; // SBUS baudrate
-static const int FAILSAFE_TIMEOUT_MS = 150; // 多久沒收到 frame 就視為失聯（ms）
+static const int FAILSAFE_TIMEOUT_MS = 150; // 失聯秒數
 
-// SBUS 原始數值範圍（用來 normalize）
+//SBUS 原始數值範圍
 static const int STICK_MIN = 206;      // SBUS 最小值
 static const int STICK_MAX = 1800;     // SBUS 最大值
 
-// SBUS 通道
-static const int CH_ROLL     = 0;      // Roll（滾轉，左右傾）
-static const int CH_PITCH    = 1;      // Pitch（俯仰，前後傾）
-static const int CH_THROTTLE = 2;      // Throttle（油門，上下升降）
-static const int CH_CALIB    = 8;      // 校正開關（IMU 零點校正）
-static const int CH_ARM      = 9;      // 解鎖/上鎖開關
+//SBUS通道
+static const int CH_ROLL     = 0;      // Roll滾轉
+static const int CH_PITCH    = 1;      // Pitch俯仰
+static const int CH_YAW      = 3;      // Yaw側滾
+static const int CH_THROTTLE = 2;      // Throttle油門
+static const int CH_CALIB    = 8;      // IMU零點校正
+static const int CH_ARM      = 9;      // 解鎖開關
 
-// CH8 零點校正觸發門檻（避免一直重複觸發）
-static const int CALIB_LOW_TH  = 1000; // 小於此值：觸發一次校正
-static const int CALIB_HIGH_TH = 1500; // 大於此值：允許下一次再觸發
-
-// =======================================================
-// 7) 遙控指令限制（Stick → 角度/角速度）
-// =======================================================
-static const float PITCH_CMD_MAX_DEG     = 40.0f;  // 搖桿最大 pitch 角度指令（度）
-static const float ROLL_CMD_MAX_DEG      = 40.0f;  // 搖桿最大 roll 角度指令（度）
-static const float MAX_PITCH_RATE_DPS    = 200.0f; // pitch 目標角速度上限（deg/s）
-static const float MAX_ROLL_RATE_DPS     = 200.0f; // roll 目標角速度上限（deg/s）
-
-// 方向符號（如果發現方向相反就改 -1）
-static const float SIGN_PITCH = -1.0f;  // Pitch 方向（正負）
-static const float SIGN_ROLL  = +1.0f;  // Roll 方向（正負）
+// CH8零點校正觸發門檻
+static const int CALIB_LOW_TH  = 1000; // 小於此值觸發一次校正
+static const int CALIB_HIGH_TH = 1500; // 大於此值允許下一次再觸發
 
 // =======================================================
-// 8) 控制器參數（外迴路：角度→角速度；內迴路：角速度→致動輸出）
+// 遙控指令限制（Stick → 角度/角速度）
+// =======================================================
+static const float PITCH_CMD_MAX_DEG     = 40.0f;  // 搖桿最大pitch角度指令（度）
+static const float ROLL_CMD_MAX_DEG      = 40.0f;  // 搖桿最大roll角度指令（度）
+static const float YAW_CMD_MAX_DPS       = 50.0f; // 搖桿最大yaw角速度指令（度/秒）
+
+static const float MAX_PITCH_RATE_DPS    = 200.0f; // pitch目標角速度上限（deg/s）
+static const float MAX_ROLL_RATE_DPS     = 200.0f; // roll目標角速度上限（deg/s）
+
+// 方向符號（方向相反就改 -1）
+static const float SIGN_PITCH = -1.0f;  //Pitch方向
+static const float SIGN_ROLL  = +1.0f;  //Roll方向
+
+
+// =======================================================
+// ------------------控制器參數------------------------
 // =======================================================
 
-// --- Pitch 外迴路（角度誤差 → 角速度命令）---
-static const float Kp_pitch_ang = 3.0f;    // pitch 角度 P 增益（deg/s per deg）
-static const float Ki_pitch_ang = 0.0f;  // 先設0
-static const float Kd_pitch_ang = 0.05f;  // 先設0
-
-// [ADD] 外迴路（角度 loop）積分限幅：防止 wind-up（單位約 deg*s）
-static const float ANG_INT_LIM_PITCH = 50.0f; // [ADD] pitch 外迴路 I 最大累積
+// ------- Pitch 外迴路（角度誤差 → 角速度命令）-------
+static const float Kp_pitch_ang = 3.0f;    // pitch角度P增益
+static const float Ki_pitch_ang = 0.0f;  // pitch角度I增益
+static const float Kd_pitch_ang = 0.05f;  // pitch角度D增益
+// 外迴路積分限幅：防止 wind-up
+static const float ANG_INT_LIM_PITCH = 50.0f; 
+//---------------------------------------------------
 
 // --- Pitch 內迴路（角速度誤差 → 伺服角度輸出）---
 static const float Kp_pitch_rate = 0.25f;  // pitch rate P
 static const float Ki_pitch_rate = 0.0f;  // pitch rate I
-static const float Kd_pitch_rate = 0.0005f;   // [ADD] pitch rate D（先設0）
-static const float DTERM_CUTOFF_HZ = 20.0f; // [ADD] D 濾波截止頻率（Hz）建議 20~50
+static const float Kd_pitch_rate = 0.0005f;   // pitch rate D
+static const float DTERM_CUTOFF_HZ = 20.0f; //濾波截止頻率（Hz）
 
 // --- Roll 外迴路（角度誤差 → 角速度命令）---
-static const float Kp_roll_ang = 5.0f;     // roll 角度 P 增益
-static const float Ki_roll_ang = 0.02f;     // [ADD] roll 外迴路 I（先設0）
-static const float Kd_roll_ang = 0.05f;     // [ADD] roll 外迴路 D（先設0）
+static const float Kp_roll_ang = 5.0f;     //roll角度P
+static const float Ki_roll_ang = 0.02f;     //roll外迴路I
+static const float Kd_roll_ang = 0.05f;     //roll外迴路D
+//外迴路積分限幅：防止 wind-up
+static const float ANG_INT_LIM_ROLL = 50.0f;
 
-// [ADD] 外迴路（角度 loop）積分限幅：防止 wind-up
-static const float ANG_INT_LIM_ROLL = 50.0f; // [ADD] roll 外迴路 I 最大累積
-
-// --- Roll 內迴路（角速度誤差 → 左右油門差動量）---
-static const float Kp_roll_rate = 0.0020f; // roll rate P（輸出是油門差動，所以要小）
-static const float Ki_roll_rate = 0.0005f; // roll rate I
-static const float ROLL_DIFF_MAX = 0.15f;  // 最大差動油門幅度（±0.2）
-
-// [ADD] 內迴路（rate loop）D term：先設 0 => 行為仍是 PI
-static const float Kd_roll_rate = 0.0f;    // [ADD] roll rate D（先設0）
+// ---Roll內迴路（角速度誤差 → 左右油門差動量）---
+static const float Kp_roll_rate = 0.0020f;       //roll rate P（輸出油門差動較小）
+static const float Ki_roll_rate = 0.0005f;       //roll rate I
+static const float Kd_roll_rate = 0.0f;          //roll rate D
+static const float ROLL_DIFF_MAX = 0.15f;        //最大差動油門幅度
 
 extern float pitch_angle_error_previous; //用於紀錄上一次迴圈之誤差值
 extern float roll_angle_error_previous; //用於紀錄上一次迴圈之誤差值
 
+// ---Yaw內迴路（角速度誤差 → 左右servo差動量）---
+static const float Kp_yaw_rate = 0.01f;        //yaw rate P
+static const float Ki_yaw_rate = 0.0f;        //yaw rate I
+static const float Kd_yaw_rate = 0.0f;           //yaw rate D
+static const float YAW_DIFF_MAX = 0.10f;         //最大差動servo幅度
 
 // =======================================================
-// 9) 校正相關參數
-// =======================================================
-static const uint16_t gyroCalibSamples = 300; // 陀螺儀 bias 校正取樣次數（靜止平均）
+
+// 姿態估測相關參數
+extern float pitch_deg, roll_deg, yaw_deg;
+extern float pitch_offset, roll_offset, yaw_offset;
+extern bool  calibPrevActive;
+extern float gx_bias, gy_bias, gz_bias;
+
+//內迴路積分狀態紀錄
+extern float Pitch_rateInt;
+extern float Roll_rateInt;
+extern float Yaw_rateInt;
+
+//外迴路積分狀態紀錄
+extern float Pitch_angInt;
+extern float Roll_angInt;
+
+// 內迴路D狀態
+extern float Pitch_rateErrPrev; 
+extern float Roll_rateErrPrev;
+extern float Yaw_rateErrPrev;
+extern float Pitch_rate_dterm_filt; 
+extern float Roll_rate_dterm_filt;
+extern float Yaw_rate_dterm_filt;
+//外迴路D狀態
+extern float Pitch_attitude_dterm_filt; 
+extern float Roll_attitude_dterm_filt;
 
 // =======================================================
-// 10) 全域狀態（如果你要留在 .ino 也可以）
+// 陀螺儀校正相關參數
 // =======================================================
+static const uint16_t gyroCalibSamples = 300; //陀螺儀bias校正取樣次數（靜止平均）
 
+// =======================================================
+// 全域變數宣告
 // SBUS
 extern HardwareSerial &sbusSerial;  // SBUS
 extern uint8_t  sbusBuf[SBUS_FRAME_SIZE];
@@ -136,45 +173,52 @@ extern uint16_t sbusCh[16];
 extern bool     haveFrame;
 extern uint32_t lastSbusMs;
 
+extern Madgwick filter;
+extern Madgwick filterYaw;
+extern Adafruit_PWMServoDriver pwm;
+extern ICM_20948_I2C myICM;
+extern Adafruit_NeoPixel pixel;
+extern HardwareSerial &sbusSerial;
+
 // 姿態角（估測）
 extern float pitch_deg, roll_deg, yaw_deg;
 
 // 零點 offset（按 CH_CALIB 校正）
-extern float pitch_offset, roll_offset;
+extern float pitch_offset, roll_offset, yaw_offset;
 extern bool  calibPrevActive;
 
-// Gyro bias
+// 陀螺儀 bias
 extern float gx_bias, gy_bias, gz_bias;
 
-// PI 狀態 積分記憶
-extern float Pitch_rateInt;
-extern float Roll_rateInt;
-
-// [ADD] 外迴路（角度 loop）I 狀態（Ki=0 時不影響）
-extern float Pitch_angInt;   // [ADD]
-extern float Roll_angInt;    // [ADD]
-
-// [ADD] 內迴路（rate loop）D 狀態（Kd=0 時不影響）
-extern float Pitch_rateErrPrev; 
-extern float Roll_rateErrPrev;  
-extern float Pitch_rate_dterm_filt; 
-extern float Roll_rate_dterm_filt;
-extern float Pitch_attitude_dterm_filt; 
-extern float Roll_attitude_dterm_filt;
-
-
-// loop timing
+// 上一次迴圈時間紀錄
 extern int lastLoopUs;
 
-
+//搖桿值
 extern float pitchStick;
 extern float rollStick;
-// =======================================================
-static const float STICK_CENTER_DB = 0.05f;   // 你已經用 0.05 了
-static const float RATE_CMD_DB_DPS = 5.0f;    // 目標角速度 < 5 deg/s 視為回中
-static const float GYRO_DB_DPS     = 5.0f;    // 實際角速度 < 5 deg/s 視為快停了
+extern float yawStick;
 
-// 400Hz衰減係數
-static const float I_DECAY= 0.98f;    // 慢衰 (約幾秒才明顯)
-extern bool allow_integrate; // 是否允許積分
-// static const float I_DECAY_FAST = 0.9950f;    // 快衰 (約 0.5~1 秒就很明顯)
+// ==================死區設定====================
+static const float STICK_CENTER_DB = 0.05f;   // 搖桿死區範圍
+static const float RATE_CMD_DB_DPS = 5.0f;    // 角速度指令死區範圍（deg/s）
+static const float GYRO_DB_DPS     = 5.0f;     // 陀螺儀死區範圍（deg/s）
+
+static const float gz_cut_off = 15.0f;
+
+//400Hz衰減係數
+static const float I_DECAY= 0.98f;    //衰減參數
+
+
+//---------------------磁力校正參數-----------------------
+struct MagCalibration {
+    float bias[3];      // 硬鐵干擾項
+    float scale[3];     // 軟鐵干擾項
+};
+
+extern MagCalibration globalMagCalib;
+
+// 函式宣告
+void runMagCalibration(ICM_20948_I2C &myICM);
+void applyMagCalibration(float rawX, float rawY, float rawZ, float &calX, float &calY, float &calZ);
+
+#endif
