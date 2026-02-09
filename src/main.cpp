@@ -5,6 +5,7 @@
 #include <math.h>
 #include "par_pid.h"  
 #include <MadgwickAHRS.h>
+#include <mavlink.h>
 
 //---------------------------參數在main.cpp宣告---------------------------
 Madgwick filter;  // Madgwick 濾波器
@@ -31,6 +32,8 @@ float Pitch_angInt = 0.0f, Roll_angInt = 0.0f;
 //內迴路（rate loop）D 狀態
 float Pitch_rateErrPrev = 0.0f, Roll_rateErrPrev = 0.0f, Yaw_rateErrPrev = 0.0f; 
 float Pitch_attitude_dterm_filt  = 0.0f, Roll_attitude_dterm_filt  = 0.0f; 
+float gain = 0.4f; // 接近地面時降低 D 項增益
+
 float pitch_rate_dterm = 0.0f, roll_rate_dterm = 0.0f, yaw_rate_dterm = 0.0f;
 float Pitch_rate_dterm_filt = 0.0f, Roll_rate_dterm_filt = 0.0f, Yaw_rate_dterm_filt = 0.0f;
 
@@ -44,6 +47,8 @@ float pitchStick;
 float rollStick;
 float yawStick;
 
+static float gx_filt_state = 0.0f;
+static float gy_filt_state = 0.0f;
 static float gz_filt_state = 0.0f;
 
 //---------------------------參數宣告結束---------------------------
@@ -73,7 +78,7 @@ static inline float sbusTo01(int stick_value) {   //搖桿數值轉0到1(油門�
 
 float usToTicks(float us) {  //秒數轉ticks(1 tick = 1/4096 of frame)
   float ticks = us * 4096.0f * SERVO_FREQ / 1000000.0f;
-//   Serial.println(ticks);
+  // Serial.println(ticks);
   return ticks;
 }
 
@@ -131,7 +136,8 @@ bool tryReadSbusFrame() {  //嘗試讀取SBUS frame，並存取到sbusCh陣列
   return false;
 }
 
-void readIMU_mag(float &axg, float &ayg, float &azg, float &gx_dps, float &gy_dps, float &gz_dps,float &gz_filt, float &mag_x, float &mag_y, float &mag_z, float dt){   //讀取IMU數值
+void readIMU_mag(float &axg, float &ayg, float &azg, float &gx_dps, float &gy_dps, float &gz_dps, float &gx_filt, float &gy_filt //
+                  ,float &gz_filt, float &mag_x, float &mag_y, float &mag_z, float dt){   //讀取IMU數值
     // 讀取 IMU
     myICM.getAGMT();
     // 原始量測
@@ -142,6 +148,19 @@ void readIMU_mag(float &axg, float &ayg, float &azg, float &gx_dps, float &gy_dp
     gx_dps = myICM.gyrX() - gx_bias;  // deg/s
     gy_dps = myICM.gyrY() - gy_bias;
     gz_dps = myICM.gyrZ() - gz_bias;
+
+    // 濾波處理
+    const float gx_tau = 1.0f / (2.0f * PI * gx_cut_off);
+    float gx_alpha = dt / (dt + gx_tau);
+    gx_alpha = clampf(gx_alpha, 0.0f, 1.0f);
+    gx_filt_state += gx_alpha * (gx_dps - gx_filt_state);
+    gx_filt = gx_filt_state;
+
+    const float gy_tau = 1.0f / (2.0f * PI * gy_cut_off);
+    float gy_alpha = dt / (dt + gy_tau);
+    gy_alpha = clampf(gy_alpha, 0.0f, 1.0f);
+    gy_filt_state += gy_alpha * (gy_dps - gy_filt_state);
+    gy_filt = gy_filt_state;
 
     
     const float gz_tau = 1.0f / (2.0f * PI * gz_cut_off);
@@ -157,6 +176,21 @@ void readIMU_mag(float &axg, float &ayg, float &azg, float &gx_dps, float &gy_dp
     //使用算好的磁力校正參數
     applyMagCalibration(raw_mag_x, raw_mag_y, raw_mag_z, mag_x, mag_y, mag_z);
 }
+
+static inline float rampLimit(float target, float &state, float rate_up, float rate_down, float dt) {
+  // rate_up / rate_down: 每秒最多變化量（單位同 target，例如 deg/s 或 unit/s）
+  float dx = target - state;
+
+  float maxUp   = rate_up   * dt;   // 允許上升的最大步進
+  float maxDown = rate_down * dt;   // 允許下降的最大步進（正值）
+
+  if (dx >  maxUp)    dx =  maxUp;
+  if (dx < -maxDown)  dx = -maxDown;
+
+  state += dx;
+  return state;
+}
+
 
 void calibrateGyroBias() { //校正一開始的偏移
   Serial.println("正在校正IMU，請保持靜止...");
@@ -199,10 +233,16 @@ float Pitch_ratePID(float pitch_rateErr, float dt, float thr01, bool allow_integ
 
     pitch_rate_dterm = Pitch_rate_dterm_filt;
   }
-
+  if (thr01 < 0.60f) {   // 接近地面
+    gain = 0.4f;
+  }
+  else {
+    gain = 1.0f;
+  }
+  
   Pitch_rateErrPrev = pitch_rateErr; //更新前次誤差
 
-  return Kp_pitch_rate * pitch_rateErr + Ki_pitch_rate * Pitch_rateInt + Kd_pitch_rate * pitch_rate_dterm;  //回傳控制量
+  return Kp_pitch_rate * pitch_rateErr + Ki_pitch_rate * Pitch_rateInt + Kd_pitch_rate * pitch_rate_dterm * gain;  //回傳控制量
 }
 
 float Roll_ratePID(float roll_rateErr, float dt, float thr01, bool allow_integrate) {  //控制器(內迴路)
@@ -246,7 +286,7 @@ float Yaw_ratePID(float yaw_rateErr, float dt, float thr01, bool allow_integrate
     Yaw_rateInt *= I_DECAY;
   }
 
-  if (thr01 < 0.35f) {
+  if (thr01 < 0.50f) {
     Yaw_rateInt = 0.0f;
   }
   // D
@@ -316,7 +356,7 @@ void ZeroCalibration(bool valid, int calib_raw, float pitch_deg, float roll_deg,
 //----------------------------------姿態(角度)控制器-------------------------------------- 
 float attitude_Pitch_PID(float angle_cmd_deg, float angle_meas_deg,
                          float dt, float Kp, float Ki, float Kd,
-                         float rate_limit_dps) {
+                         float rate_limit_dps, float thr01) {
   float pitch_angle_error = (angle_cmd_deg - angle_meas_deg) * SIGN_PITCH;
 
   bool stick_center = (fabs(pitchStick) < STICK_CENTER_DB);
@@ -340,7 +380,14 @@ float attitude_Pitch_PID(float angle_cmd_deg, float angle_meas_deg,
   Pitch_attitude_dterm_filt += alpha * (pitch_attitude_d_raw - Pitch_attitude_dterm_filt);
   }
 
-  float rate_cmd = Kp * pitch_angle_error + Ki * Pitch_angInt + Kd * Pitch_attitude_dterm_filt;
+  if (thr01 < 0.60f) {   // 接近地面
+    gain = 0.4f;
+  }
+  else {
+    gain = 1.0f;
+  }
+
+  float rate_cmd = Kp * pitch_angle_error + Ki * Pitch_angInt + Kd * Pitch_attitude_dterm_filt * gain;
   rate_cmd = clampf(rate_cmd, -rate_limit_dps, +rate_limit_dps);
   pitch_angle_error_previous = pitch_angle_error;  // 更新上一次的角度誤差
   return rate_cmd;
@@ -399,6 +446,11 @@ float Pitch_angle_rate_controller(float gx_dps, float pitch_rate_cmd, float dt, 
 
   float pitch_command = Pitch_ratePID(pitch_rateErr, dt, thr01, allow_integrate_rate);   //用PI控制器算出來的pitch指令(deg)
 
+  static float pitch_command_smooth = 0.0f;
+  float lpf = 0.15f; //濾波平滑
+
+  pitch_command_smooth = (pitch_command * lpf) + (pitch_command_smooth * (1.0f - lpf));
+  pitch_command = pitch_command_smooth;
   pitch_command = clampf(pitch_command, -(float)SERVO_PITCH_RANGE, +(float)SERVO_PITCH_RANGE);
   return pitch_command;
 }
@@ -415,16 +467,20 @@ float Roll_angle_rate_controller(float gy_dps, float roll_rate_cmd, float dt, fl
   bool allow_integrate_rate = !settled;
 
   float roll_command = Roll_ratePID(roll_rateErr, dt, thr01, allow_integrate_rate);   //用PI控制器算出來的roll指令(deg)
-
+  static float roll_u_smooth = 0.0f;
+  float lpf = 0.15f; // 數值越小越平滑 (0.01 ~ 1.0)
+  // 在進入 mixer 之前濾波
+  roll_u_smooth = (roll_command * lpf) + (roll_u_smooth * (1.0f - lpf));
+  roll_command = roll_u_smooth;
   roll_command = clampf(roll_command, -(float)ROLL_DIFF_MAX, +(float)ROLL_DIFF_MAX); // 限幅 
   return roll_command;
 }
 
 float Yaw_angle_rate_controller(float gz_filt, float yaw_rate_cmd, float dt, float thr01) {
   if (fabs(gz_filt) < 5.0f && fabs(yaw_rate_cmd) < 5.0f) {
-  return 0.0f;
+    return 0.0f;
   }
-  float yaw_rate_measure = gz_filt;                 // 實際 yaw 角速度 (deg/s)
+  float yaw_rate_measure = gz_filt * SIGN_YAW;                 // 實際 yaw 角速度 (deg/s)
   float yaw_rateErr = yaw_rate_cmd - yaw_rate_measure;
 
   bool stick_center = (fabs(yawStick) < STICK_CENTER_DB);
@@ -439,16 +495,13 @@ float Yaw_angle_rate_controller(float gz_filt, float yaw_rate_cmd, float dt, flo
 
 //---------------------------------------------------------------------------------------
 
-void mixer_Pitch_Yaw_servo(float pitch_cmd,float yaw_u, float *servo1_deg, float *servo2_deg){
+void mixer_Pitch_Yaw_servo(float pitch_cmd,float yaw_deg, float *servo1_deg, float *servo2_deg){
 
   pitch_cmd = clampf(pitch_cmd, -SERVO_PITCH_RANGE, +SERVO_PITCH_RANGE);
-  yaw_u     = clampf(yaw_u, -YAW_DIFF_MAX, +YAW_DIFF_MAX);
-  
-  const float YAW_TO_DEG = 30.0f;
-  float yaw_deg = yaw_u * YAW_TO_DEG;
+  float yaw_diff   = clampf(yaw_deg, -YAW_DIFF_MAX, +YAW_DIFF_MAX);
 
-  float s1 = SERVO_CENTER + pitch_cmd+ yaw_deg ;
-  float s2 = SERVO_CENTER - pitch_cmd- yaw_deg ;
+  float s1 = SERVO_CENTER - pitch_cmd -yaw_diff ;  //這邊正負號可以改變自穩的方向
+  float s2 = SERVO_CENTER - pitch_cmd + yaw_diff ;
 
   s1 = clampf(s1, SERVO_MIN_ANG, SERVO_MAX_ANG);
   s2 = clampf(s2, SERVO_MIN_ANG, SERVO_MAX_ANG);
@@ -466,29 +519,48 @@ void mixer_roll_esc(float thr01, float roll_u, float *esc1, float *esc2) {
   *esc2 = clampf(e2, 0.35f, 1.0f);
 }
 
-void outputESCServo(bool is_unlocked, bool valid, float esc1_speed, float esc2_speed, float servo1_deg, float servo2_deg){
-  if (!is_unlocked || !valid) { //鎖定或無效解碼
-    // PWM 輸出
-    setESC01(PCA_ESC_CH1, 0.0f); 
-    setESC01(PCA_ESC_CH2, 0.0f); 
+void outputESCServo(bool is_unlocked, bool valid,
+                    float esc1_speed, float esc2_speed,
+                    float servo1_deg, float servo2_deg) {
 
-    // 伺服回中間
+  static float s1_state = SERVO_CENTER;
+  static float s2_state = SERVO_CENTER;
+
+  static uint32_t lastServoUs = 0;
+
+  if (!is_unlocked || !valid) {
+    setESC01(PCA_ESC_CH1, 0.0f);
+    setESC01(PCA_ESC_CH2, 0.0f);
+
     setServoAngle(PCA_SERVO_CH1, SERVO_CENTER);
     setServoAngle(PCA_SERVO_CH2, SERVO_CENTER);
+
+    s1_state = SERVO_CENTER;
+    s2_state = SERVO_CENTER;
+    lastServoUs = micros();
 
     resetPID();
     return;
   }
 
-  setESC01(PCA_ESC_CH1, esc1_speed);
-  setESC01(PCA_ESC_CH2, esc2_speed);
-  static uint32_t lastServoUs=0;
-  if (micros()-lastServoUs >= 20000) { // 50Hz
-    lastServoUs = micros();
+  uint32_t nowUs = micros();
+  if ((uint32_t)(nowUs - lastServoUs) >= 20000) { // 50Hz
+    float dt_servo = (nowUs - lastServoUs) / 1e6f;
+    lastServoUs = nowUs;
+
+    setESC01(PCA_ESC_CH1, esc1_speed);
+    setESC01(PCA_ESC_CH2, esc2_speed);
+
+    float rate = (esc1_speed < 0.45f) ? 125.0f : 250.0f;
+
+    servo1_deg = rampLimit(servo1_deg, s1_state, rate, rate, dt_servo);
+    servo2_deg = rampLimit(servo2_deg, s2_state, rate, rate, dt_servo);
+
     setServoAngle(PCA_SERVO_CH1, servo1_deg);
     setServoAngle(PCA_SERVO_CH2, servo2_deg);
   }
 }
+
 
 void locked(){
   setServoAngle(PCA_SERVO_CH1, SERVO_CENTER);
@@ -504,20 +576,21 @@ void setup() {
   Wire.setClock(400000);  
 
   pwm.begin();
-  pwm.setPWMFreq(SERVO_FREQ);  // 設定PWM頻率100Hz
+  pwm.setOscillatorFrequency(27000000);
+  pwm.setPWMFreq(SERVO_FREQ);  // 設定PWM頻率50Hz
 
   pixel.begin();
   pixel.setBrightness(20);
   pixel.show(); 
 
-  // pinMode(DBG_PIN, OUTPUT);
-  // digitalWrite(DBG_PIN, LOW);
+  mavlink_init();
+
   pinMode(START_PIN, OUTPUT);
   digitalWrite(START_PIN, LOW);
 
   sbusSerial.begin(SBUS_BAUD, SERIAL_8E2, SBUS_RX_PIN, -1);  
   sbusSerial.setRxInvert(true);  //反向接收
-  
+
   if (myICM.begin(Wire, ICM_ADDRESS) != ICM_20948_Stat_Ok) {
     Serial.println("ICM20948 not detected!");
     while (1) delay(100);
@@ -525,6 +598,7 @@ void setup() {
   calibrateGyroBias();  //校正gyro bias
   
   filter.begin(LOOP_HZ);   //初始化MadgwickAHRS
+  
   filterYaw.begin(LOOP_HZ);  
 
   myICM.getAGMT();  //取得初始加速度計數值以計算初始角度
@@ -606,10 +680,10 @@ void loop() {
   // ---------------- IMU更新 -----------------
   float axg, ayg, azg;  //無磁力計
   float gx_dps, gy_dps, gz_dps;
-  float gz_filt;
+  float gx_filt, gy_filt, gz_filt;
   float mag_x, mag_y, mag_z;
 
-  readIMU_mag(axg, ayg, azg, gx_dps, gy_dps, gz_dps, gz_filt, mag_x, mag_y, mag_z, dt);//讀取含磁力計的IMU數值，加上磁力校正
+  readIMU_mag(axg, ayg, azg, gx_dps, gy_dps, gz_dps, gx_filt, gy_filt, gz_filt, mag_x, mag_y, mag_z, dt);//讀取含磁力計的IMU數值，加上磁力校正
   // ------------------------------------------
 
   // update Madgwick (IMU:無磁力計 先取roll pitch)
@@ -663,9 +737,10 @@ void loop() {
   float roll_corr = roll_deg - roll_offset; 
   float yaw_corr = yaw_deg - yaw_offset;
 
+
   //-------------------Outer: 角度誤差 -> 目標角速度(使用P控制器) -----內迴路應該達到的角速度目標----------------------
 
-  float pitch_rate_cmd = attitude_Pitch_PID(pitch_cmd_deg, pitch_corr, dt, Kp_pitch_ang, Ki_pitch_ang, Kd_pitch_ang, MAX_PITCH_RATE_DPS); //角速度pitch
+  float pitch_rate_cmd = attitude_Pitch_PID(pitch_cmd_deg, pitch_corr, dt, Kp_pitch_ang, Ki_pitch_ang, Kd_pitch_ang, MAX_PITCH_RATE_DPS, thr01); //角速度pitch
   float roll_rate_cmd = attitude_Roll_PID(roll_cmd_deg, roll_corr, dt, Kp_roll_ang, Ki_roll_ang, Kd_roll_ang, MAX_ROLL_RATE_DPS);  //角速度roll
 
   //------------------------------------Outer End---------------------------------------------------------
@@ -676,6 +751,10 @@ void loop() {
   float pitch_output_servo = Pitch_angle_rate_controller(gx_dps, pitch_rate_cmd, dt, thr01); // 輸出最終pitch角度控制指令
   float roll_output_throttle = Roll_angle_rate_controller(gy_dps, roll_rate_cmd, dt, thr01); // 輸出最終roll角度控制指令
   float yaw_diff_output = Yaw_angle_rate_controller(gz_filt, yaw_cmd_dps, dt, thr01); // 輸出最終yaw角度控制指令
+
+  
+  // 建議起手值：上升/下降 200~400 deg/s（你可再調）
+  // pitch_output_servo = rampLimit(pitch_output_servo, pitch_ramp_state, 125.0f, 125.0f, SERVO_DT);
 
   //------------------------------------Inner End---------------------------------------------------------
 
@@ -694,6 +773,20 @@ void loop() {
 
   // ---------------- ESC & Servo 輸出----------------
   outputESCServo(is_unlocked, valid, esc1_speed, esc2_speed, servo1_deg, servo2_deg);
+
+
+  static uint32_t lastMavMs = 0;
+  if (millis() - lastMavMs > 50) {   // 20Hz
+    lastMavMs = millis();
+    mavlink_send_attitude(roll_corr  * DEG_TO_RAD, pitch_corr * DEG_TO_RAD, yaw_corr   * DEG_TO_RAD);  //傳送姿態角
+    mavlink_send_servo_angles(servo1_deg, servo2_deg); //傳送伺服角度
+    }
+
+  static uint32_t lastHbMs = 0;
+  if (millis() - lastHbMs >= 1000) {  // 1Hz(心跳包)
+    lastHbMs = millis();
+    mavlink_send_heartbeat();
+    }
   // -------------------------------------------------
   // ---- debug gz ----
   // ----------------Print----------------

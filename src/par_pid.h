@@ -7,8 +7,6 @@
 #include <Adafruit_NeoPixel.h>
 
 
-
-
 // =======================================================
 // 腳位設定
 // =======================================================
@@ -25,7 +23,7 @@
 
 //PCA9685通道
 #define PCA_ESC_CH1    1       // ESC 1左馬達
-#define PCA_ESC_CH2     13        // ESC 2 右馬達
+#define PCA_ESC_CH2     14        // ESC 2 右馬達
 #define PCA_SERVO_CH1  0      // Servo 1 左伺服
 #define PCA_SERVO_CH2  15    // Servo 2 右伺服
 
@@ -72,6 +70,12 @@ static const int CH_THROTTLE = 2;      // Throttle油門
 static const int CH_CALIB    = 8;      // IMU零點校正
 static const int CH_ARM      = 9;      // 解鎖開關
 
+// ===== UART 設定 =====
+#define MAV_SERIAL   Serial2
+#define MAV_TX_PIN   37
+#define MAV_RX_PIN   36
+#define MAV_BAUD     57600
+
 // CH8零點校正觸發門檻
 static const int CALIB_LOW_TH  = 1000; // 小於此值觸發一次校正
 static const int CALIB_HIGH_TH = 1500; // 大於此值允許下一次再觸發
@@ -86,9 +90,10 @@ static const float YAW_CMD_MAX_DPS       = 50.0f; // 搖桿最大yaw角速度指
 static const float MAX_PITCH_RATE_DPS    = 200.0f; // pitch目標角速度上限（deg/s）
 static const float MAX_ROLL_RATE_DPS     = 200.0f; // roll目標角速度上限（deg/s）
 
-// 方向符號（方向相反就改 -1）
+// 方向符號（方向相反就改 -1）  //這邊正負號可以改變搖桿的方向
 static const float SIGN_PITCH = -1.0f;  //Pitch方向
-static const float SIGN_ROLL  = +1.0f;  //Roll方向
+static const float SIGN_ROLL  = -1.0f;  //Roll方向
+static const float SIGN_YAW  = -1.0f;
 
 
 // =======================================================
@@ -98,7 +103,7 @@ static const float SIGN_ROLL  = +1.0f;  //Roll方向
 // ------- Pitch 外迴路（角度誤差 → 角速度命令）-------
 static const float Kp_pitch_ang = 3.0f;    // pitch角度P增益
 static const float Ki_pitch_ang = 0.0f;  // pitch角度I增益
-static const float Kd_pitch_ang = 0.05f;  // pitch角度D增益
+static const float Kd_pitch_ang = 0.008f;  // pitch角度D增益
 // 外迴路積分限幅：防止 wind-up
 static const float ANG_INT_LIM_PITCH = 50.0f; 
 //---------------------------------------------------
@@ -106,19 +111,20 @@ static const float ANG_INT_LIM_PITCH = 50.0f;
 // --- Pitch 內迴路（角速度誤差 → 伺服角度輸出）---
 static const float Kp_pitch_rate = 0.25f;  // pitch rate P
 static const float Ki_pitch_rate = 0.0f;  // pitch rate I
-static const float Kd_pitch_rate = 0.0005f;   // pitch rate D
-static const float DTERM_CUTOFF_HZ = 20.0f; //濾波截止頻率（Hz）
+static const float Kd_pitch_rate = 0.000125f;   // pitch rate D
+static const float DTERM_CUTOFF_HZ = 10.0f; //濾波截止頻率（Hz）
+extern float gain;
 
 // --- Roll 外迴路（角度誤差 → 角速度命令）---
-static const float Kp_roll_ang = 5.0f;     //roll角度P
-static const float Ki_roll_ang = 0.02f;     //roll外迴路I
-static const float Kd_roll_ang = 0.05f;     //roll外迴路D
+static const float Kp_roll_ang = 3.0f;     //roll角度P
+static const float Ki_roll_ang = 0.005f;     //roll外迴路I
+static const float Kd_roll_ang = 0.002f;     //roll外迴路D
 //外迴路積分限幅：防止 wind-up
 static const float ANG_INT_LIM_ROLL = 50.0f;
 
 // ---Roll內迴路（角速度誤差 → 左右油門差動量）---
-static const float Kp_roll_rate = 0.0020f;       //roll rate P（輸出油門差動較小）
-static const float Ki_roll_rate = 0.0005f;       //roll rate I
+static const float Kp_roll_rate = 0.0010f;       //roll rate P（輸出油門差動較小）
+static const float Ki_roll_rate = 0.0f;       //roll rate I
 static const float Kd_roll_rate = 0.0f;          //roll rate D
 static const float ROLL_DIFF_MAX = 0.15f;        //最大差動油門幅度
 
@@ -126,10 +132,10 @@ extern float pitch_angle_error_previous; //用於紀錄上一次迴圈之誤差�
 extern float roll_angle_error_previous; //用於紀錄上一次迴圈之誤差值
 
 // ---Yaw內迴路（角速度誤差 → 左右servo差動量）---
-static const float Kp_yaw_rate = 0.01f;        //yaw rate P
-static const float Ki_yaw_rate = 0.0f;        //yaw rate I
-static const float Kd_yaw_rate = 0.0f;           //yaw rate D
-static const float YAW_DIFF_MAX = 0.10f;         //最大差動servo幅度
+static const float Kp_yaw_rate = 1.0f;        //yaw rate P
+static const float Ki_yaw_rate = 0.001f;        //yaw rate I
+static const float Kd_yaw_rate = 0.0004f;           //yaw rate D
+static const float YAW_DIFF_MAX = 25.0f;         //最大差動servo幅度
 
 // =======================================================
 
@@ -203,7 +209,10 @@ static const float STICK_CENTER_DB = 0.05f;   // 搖桿死區範圍
 static const float RATE_CMD_DB_DPS = 5.0f;    // 角速度指令死區範圍（deg/s）
 static const float GYRO_DB_DPS     = 5.0f;     // 陀螺儀死區範圍（deg/s）
 
+static const float gx_cut_off = 15.0f;
+static const float gy_cut_off = 15.0f;
 static const float gz_cut_off = 15.0f;
+
 
 //400Hz衰減係數
 static const float I_DECAY= 0.98f;    //衰減參數
@@ -220,5 +229,19 @@ extern MagCalibration globalMagCalib;
 // 函式宣告
 void runMagCalibration(ICM_20948_I2C &myICM);
 void applyMagCalibration(float rawX, float rawY, float rawZ, float &calX, float &calY, float &calZ);
+
+//mavlink
+void mavlink_init();
+
+void mavlink_send_heartbeat();
+
+// 傳送姿態（單位：rad）
+void mavlink_send_attitude(float roll_rad, float pitch_rad, float yaw_rad);
+
+// 傳送伺服角度deg
+void mavlink_send_servo_angles(float servo1_deg, float servo2_deg);
+
+// 需要時可呼叫（未來用）
+void mavlink_poll_rx();
 
 #endif
